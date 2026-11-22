@@ -1,0 +1,68 @@
+# Local version of the platform: one command starts everything.
+#   docker compose up --build
+# Web app: http://localhost:5173   API docs: http://localhost:8000/docs
+
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql://startup:startup@postgres:5432/startup
+  PUBSUB_EMULATOR_HOST: pubsub:8085      # makes the Google client use the emulator
+  PUBSUB_PROJECT_ID: startup-local
+  PYTHONUNBUFFERED: "1"
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: startup
+      POSTGRES_PASSWORD: startup
+      POSTGRES_DB: startup
+    ports: ["5432:5432"]
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U startup"]
+      interval: 2s
+      retries: 20
+
+  pubsub:
+    # Google's official Pub/Sub emulator (stands in for GCP Pub/Sub locally)
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: gcloud beta emulators pubsub start --project=startup-local --host-port=0.0.0.0:8085
+    ports: ["8085:8085"]
+
+  api:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment: *backend-env
+    ports: ["8000:8000"]
+    volumes: ["./backend/app:/srv/app"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  relay:
+    build: ./backend
+    command: python -m app.relay
+    environment: *backend-env
+    volumes: ["./backend/app:/srv/app"]
+    restart: on-failure
+    depends_on:
+      postgres: { condition: service_healthy }
+      pubsub: { condition: service_started }
+
+  scheduler:
+    build: ./backend
+    command: python -m app.scheduler
+    environment: *backend-env
+    volumes: ["./backend/app:/srv/app"]
+    restart: on-failure
+    depends_on:
+      postgres: { condition: service_healthy }
+      pubsub: { condition: service_started }
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports: ["5173:5173"]
+    volumes:
+      - ./frontend/src:/app/src
+    depends_on: [api]
